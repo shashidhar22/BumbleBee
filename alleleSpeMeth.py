@@ -13,9 +13,11 @@ import seaborn as sns
 from pyfasta import Fasta
 import subprocess
 from multiprocessing import Pool
+#from pathos.multiprocessing import ProcessingPool as Pool
 import glob
 import scipy.stats
 from itertools import repeat
+from itertools import chain
 from pprint import pprint
 from sklearn.naive_bayes import BernoulliNB
 from sklearn import cross_validation
@@ -27,16 +29,13 @@ pandas2ri.activate()
 def create_matrix(arguments):
     print('Creating matrices')
     dist_dict = dict()
-    varfile = vcf.Reader(open(arguments[0])) 
+    varfile = vcf.Reader(open(arguments[0]))
     samfile = pysam.AlignmentFile(arguments[1]) 
     fasta = Fasta(arguments[2])
     metdict = dict() 
-    out_file = csv.writer(open(os.path.splitext(arguments[0])[0]+'.tsv','w'),delimiter='\t')
-    out_file.writerow(['#Minimum depth:10'])
-    out_file.writerow(['#Minimum allele depth:3'])
-    out_file.writerow(['#Accuracy threshold : 0.55'])
-    out_file.writerow(['#CpG window: 200bp'])
-    out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Fisher\'s method','Window Considered'])
+    #out_file = csv.writer(open(os.path.splitext(arguments[0])[0]+'.tsv','w'),delimiter='\t')
+    out_file = list()
+    #out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Fisher\'s method','Window Considered'])
     record_array = list()
     var_accuracy = dict()
     for var in varfile:
@@ -67,25 +66,35 @@ def create_matrix(arguments):
             records_data = pd.DataFrame(record_array,index=index_list).drop(labels='',axis=0)
             records_data.sort(axis=1).replace(4,np.nan).to_csv(str(var.CHROM)+'_'+str(var.POS)+'.csv',na_rep='NaN')
             accuracy = NaiveBayes(str(var.CHROM)+'_'+str(var.POS)+'.csv',str(var.CHROM)+'_'+str(var.POS))
+            os.remove(str(var.CHROM)+'_'+str(var.POS)+'.csv')
             fisher_values, fisher_tables = pvector(records_data)
             context_dict = get_met(var.CHROM,list(records_data.columns.values),fasta)
             window_frame = {key:val for key,val in fisher_values.iteritems() if context_dict[int(key)] != 'NA' and val < 0.05}
-            feature_mean,window = recursive_fisher(fisher_values,2,var.POS,2)
+            test_count = 1
+            feature_mean,window = recursive_fisher(fisher_values,20,var.POS,20,test_count)
             print(feature_mean)
             var_accuracy[(var.CHROM)+':'+str(var.POS)] = accuracy
-            plot_matrix(records_data,var.CHROM+'_'+str(var.POS))
-            out_file.writerow([var.CHROM,str(var.POS),var.REF,','.join([str(vals) for vals in var.ALT]),str(len(record_array)),str(index_list.count('R')),str(index_list.count('A')),str(context_dict.values().count('CG')),str(context_dict.values().count('CHG')), str(context_dict.values().count('CHH')),str(context_dict.values().count('NA')),str(accuracy),str(len(window_frame)),str(feature_mean),str(window)])
-            plot_ratios(records_data,var.CHROM,var.POS)
+            #plot_matrix(records_data,var.CHROM+'_'+str(var.POS))
+            out_file.append([var.CHROM,str(var.POS),var.REF,','.join([str(vals) for vals in var.ALT]),str(len(record_array)),str(index_list.count('R')),str(index_list.count('A')),str(context_dict.values().count('CG')),str(context_dict.values().count('CHG')), str(context_dict.values().count('CHH')),str(context_dict.values().count('NA')),str(accuracy),str(len(window_frame)),str(feature_mean),str(window)])
+            #plot_ratios(records_data,var.CHROM,var.POS,context_dict)
     mean  = np.mean(var_accuracy.values())
     std = np.std(var_accuracy.values())
-    return(dist_dict)
+    return(out_file)
 
-def plot_ratios(records_data,chr,pos):
-    methylation_records = counter(records_data)
+def plot_ratios(records_data,chr,pos,context_dict):
+    methylation_records,context_records = counter(records_data,context_dict)
     methylation_records.to_csv(str(chr)+'_'+str(pos)+'_methratio.csv')
     plt.figure(figsize=(36, 12), facecolor='w', edgecolor='k')
-    methylation_records.transpose().plot(kind='hist',alpha=0.5)
+    methylation_records.transpose().plot(kind='hist',alpha=0.5,bins=20)
+    plt.title(str(chr)+'_'+str(pos))
+    plt.ylabel('No of CpG,CHG,CHH')
+    plt.xlabel('Methylation ratio')
     plt.savefig(str(chr)+'_'+str(pos)+'_methratio.png')
+    plt.close()
+    plt.figure(figsize=(36, 12), facecolor='w', edgecolor='k')
+    context_records.transpose().plot(kind='bar')
+    plt.title(str(chr)+'_'+str(pos))
+    plt.savefig(str(chr)+'_'+str(pos)+'_methratio_context.png')
     plt.close()
     return
 
@@ -93,15 +102,17 @@ def fisher_method(fishers):
     sl = -2 *sum([math.log(vals) for vals in fishers])
     return(scipy.stats.chi2.sf(sl,df=2*len(fishers)))
 
-def recursive_fisher(fishers,window,pos,scan):
-    if pos- window/2 > min([int(vals) for vals in fishers.keys()]) and pos + window/2 < max([int(vals) for vals in fishers.keys()])  and  fisher_method([fishers[str(pos-vals)]  for vals in range(-window/2,(window/2)+1)]) <= 0.001:
+def recursive_fisher(fishers,window,pos,scan,test_count):
+    if pos- (window/2) in [int(vals) for vals in fishers.keys()] and (pos + window/2) in [int(vals) for vals in fishers.keys()]  and fisher_method([fishers[str(pos-vals)]  for vals in range(-(window/2),(window/2)+1) if str(pos-vals) in fishers]) <= 0.001/float(test_count):
         window += scan
-        pval,window = recursive_fisher(fishers,window,pos,scan)
-    elif pos - (window+scan)/2 >  min([int(vals) for vals in fishers.keys()])  and pos + (window+scan)/2 < max([int(vals) for vals in fishers.keys()]) and fisher_method([fishers[str(pos-vals)] for vals in range(-window/2,(window/2)+1)]) > 0.001 and fisher_method([fishers[str(pos-vals)] for vals in range(-(window+scan)/2,((window+scan)/2)+1)]) <= 0.001:
+        test_count +=1
+        pval,window = recursive_fisher(fishers,window,pos,scan,test_count)
+    elif pos - ((window+scan)/2) in  [int(vals) for vals in fishers.keys()]  and (pos + (window+scan)/2) in [int(vals) for vals in fishers.keys()] and  fisher_method([fishers[str(pos-vals)] for vals in range(-(window/2),(window/2)+1) if str(pos-vals) in fishers]) > 0.001/float(test_count) and fisher_method([fishers[str(pos-vals)] for vals in range(-((window+scan)/2),((window+scan)/2)+1) if str(pos-vals) in fishers]) <= 0.001/float(test_count) and window+scan < len(fishers):
         window += scan
-        pval, window = recursive_fisher(fishers,window,pos,scan)
+        test_count += 1
+        pval, window = recursive_fisher(fishers,window,pos,scan,test_count)
     else:
-        pval = fisher_method([fishers[str(pos-vals)]  for vals in range(-window/2,(window/2)+1)])
+        pval = fisher_method([fishers[str(pos-vals)]  for vals in range(-(window/2),(window/2)+1) if str(pos-vals) in fishers])
     return(pval,window)
 
 def watson(reads, variant,chrom,fasta,snp,alt):
@@ -114,10 +125,8 @@ def watson(reads, variant,chrom,fasta,snp,alt):
     while pos < len(positions):
         frag, ref = positions[pos]
         if ref != None and frag != None:
-            if ref == variant and sequence[frag-1].upper() == snp:
-                label = 'R'
-            elif ref ==variant and sequence[frag-1].upper() == alt:
-                label = 'A'
+            if ref == variant:
+                label = label_maker(reads,frag,sequence,snp,alt)
             if sequence[frag].upper() == 'C' and str(fasta[chrom][ref]).upper() == 'C':
                 meth_status[ref+1] = 0
             elif sequence[frag].upper() == 'T' and str(fasta[chrom][ref]).upper() == 'C':
@@ -129,10 +138,25 @@ def watson(reads, variant,chrom,fasta,snp,alt):
         pos += 1
     return(meth_status,label)
 
-def label_maker(ref,frag,sequence, snp, alt,reads):
-    if ((snp == 'C' and alt == 'T') or (snp == 'T' and alt == 'C')) and (reads.flag & 0x10):
-        
-
+def label_maker(reads,frag,sequence,snp,alt):
+    antisense = {'CTC':'R','CTT':'A','CGC':'R','CGG':'A','CGA':'A','CAC':'R','CAA':'A','ATA':'R','ATT':'A','ACA':'R','ACC':'A','GCG':'R','GCA':'R',
+                 'GCC':'A','GTG':'R','GTA':'R','GTT':'A','TAT':'R','TAA':'A','TCT':'R','TCC':'A','TGT':'R','TGG':'A','TGA':'A'}
+    sense = {'CGC':'R','CGT':'R','CGG':'A','CAC':'R','CAT':'R','CAA':'A','ATA':'R','ATT':'A','ACA':'R','ACC':'A','ACT':'A','AGA':'R',
+             'AGG':'A','GAG':'R','GAA':'A','GCG':'R','GCC':'A','GCT':'A','GTG':'R','GTT':'A','TAT':'R','TAA':'A','TGT':'R','TGG':'A'}
+    if ((snp == 'C' and alt == 'T') or (snp == 'T' and alt == 'C')) and not (reads.flag & 0x10):
+        return ('')
+    elif ((snp == 'G' and alt == 'A') or (snp == 'A' and alt == 'G')) and reads.flag & 0x10:
+        return ('')
+    elif reads.flag & 0x10:
+        try:
+            return(antisense[snp+alt+sequence[frag-1]])
+        except KeyError:
+            return('')
+    else:
+        try:
+            return(sense[snp+alt+sequence[frag-1]])
+        except KeyError:
+            return('')
 def get_met(chrom,positions,fasta):
     context = dict()
     for count,base in enumerate(positions):
@@ -164,7 +188,8 @@ def modifier(cigar):
 def plot_matrix(records_data,name):
     records_data = records_data.sort().sort(axis=1).fillna(6)
     plt.figure(figsize=(36, 12), facecolor='w', edgecolor='k')
-    sns.heatmap(records_data,square=False,cmap="Set1")
+    palate=sns.color_palette("Set1", n_colors=8, desat=.5)
+    sns.heatmap(records_data,square=False,cmap='gist_stern')
     plt.xticks(rotation=90)
     plt.savefig(name+'.pdf')
     plt.close()
@@ -195,8 +220,9 @@ def pvector(records_data):
         sig_vector[str(row)],cont_vector[str(row)] = fisher_test(values,labels)
     return(sig_vector,cont_vector)
 
-def counter(records_data):
+def counter(records_data,context_dict):
     count_list = dict()
+    context_list = dict()
     for column,series in records_data.iteritems():
         mref,uref,malt,ualt = 0,0,0,0
         for indices,values in series.iteritems():
@@ -217,7 +243,8 @@ def counter(records_data):
         except ZeroDivisionError:
             met_alt = np.nan
         count_list[column] = pd.Series([met_ref,met_alt], index=['Ref','Alt'])
-    return(pd.DataFrame(count_list))
+        context_list[context_dict[column]] = pd.Series([met_ref,met_alt],index=['Ref','Alt'])
+    return(pd.DataFrame(count_list),pd.DataFrame(context_list))
     
 def NaiveBayes(records_data):
     eozso = importr('e1071')
@@ -231,11 +258,30 @@ def NaiveBayes(records_data,var):
     except IndexError:
         accuracy = np.nan
     return(accuracy)
+
+def split_chrom(spl):
+    inp = vcf.Reader(open(spl[0]))
+    opt = vcf.Writer(open(spl[1]+'.vcf','w'),inp)
+    try:
+        for lines in inp.fetch(spl[1],0,10000000000):
+            opt.write_record(lines)
+    except ValueError:
+        print(spl[1])
+    return (spl[1]+'.vcf')
 if __name__ == '__main__':
-#    p = Pool(4)
-    vcffiles = glob.glob(sys.argv[1]+'/*.vcf')
-    print(vcffiles)
+    p = Pool(10)
+    vcffiles = sys.argv[1]
     bamfile = sys.argv[2]
     fastafile = sys.argv[3]
-#    distribution = p.map(create_matrix, zip(vcffiles,repeat(bamfile),repeat(fastafile)))
-    distribution = create_matrix([vcffiles[0],bamfile,fastafile])
+    chrm_map = chain(['chr'+str(vals) for vals in range(1,23)],['chrX','chrY'])
+    vcf_list = p.map(split_chrom,zip(repeat(vcffiles),chrm_map)) #[split_chrom(vcffiles,vals) for vals in chrm_map]
+    #sys.exit()
+    out_file = csv.writer(open(os.path.splitext(vcffiles)[0]+'.tsv','w'),delimiter='\t')
+    distribution = p.map(create_matrix, zip(vcf_list,repeat(bamfile),repeat(fastafile)))
+    out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Fisher\'s method','Window Considered'])
+    for sections in distribution:
+        for lines in sections:
+            out_file.writerow(lines)
+    for files in vcf_list:
+        os.remove(files)
+    #distribution = create_matrix([vcffiles,bamfile,fastafile])
