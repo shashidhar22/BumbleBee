@@ -3,6 +3,7 @@ import pysam
 import os
 import sys
 import csv
+import argparse
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
@@ -28,25 +29,26 @@ from rpy2.robjects import pandas2ri
 pandas2ri.activate()
 
 def create_matrix(arguments):
-    print('Creating matrices')
     dist_dict = dict()
     varfile = vcf.Reader(open(arguments[0]))
     samfile = pysam.AlignmentFile(arguments[1]) 
     fasta = Fasta(arguments[2])
+    window = arguments[3]
+    mincount = arguments[4]
     metdict = dict() 
-    #out_file = csv.writer(open(os.path.splitext(arguments[0])[0]+'.tsv','w'),delimiter='\t')
     out_file = list()
-    #out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Fisher\'s method','Window Considered'])
+    meth_file= list()
     record_array = list()
     var_accuracy = dict()
     for var in varfile:
         seen_id = set()
-        if not var.genotype('NA12878').is_het or not var.is_snp or len(var.ALT) > 1: #or (var.REF == 'C' and 'T' in var.ALT):
-                continue
+        if not var.genotype(var.samples[0].sample).is_het or not var.is_snp or len(var.ALT) > 1: #or (var.REF == 'C' and 'T' in var.ALT):
+            continue
         record_array = list()
         index_list = list()
         context_dict = dict()
-        print(var)
+        if 'chr' not in var.CHROM:
+            var.CHROM = 'chr'+var.CHROM
         for depth,reads in enumerate(samfile.fetch(region=var.CHROM+':'+str(var.POS)+':'+str(var.POS))):
             bitseq = dict()
             index = ''
@@ -72,28 +74,29 @@ def create_matrix(arguments):
                 index_list.append(index)
             if depth > 1000:
                 break
-        mincount  = 3 
-        if len(record_array) >= 10 and index_list.count('R') >= mincount  and index_list.count('A') >= mincount :
+        if index_list.count('R') >= mincount  and index_list.count('A') >= mincount :
             dist_dict[var.CHROM+'_'+str(var.POS)] = [(index_list.count('R')*100/float(len(index_list))),(index_list.count('A')*100/float(len(index_list)))]
             records_data = pd.DataFrame(record_array,index=index_list).drop(labels='',axis=0)
             records_data.sort(axis=1).replace(4,np.nan).to_csv(str(var.CHROM)+'_'+str(var.POS)+'.csv',na_rep='NaN')
             accuracy = NaiveBayes(str(var.CHROM)+'_'+str(var.POS)+'.csv',str(var.CHROM)+'_'+str(var.POS))
-            os.remove(str(var.CHROM)+'_'+str(var.POS)+'.csv')
+            #os.remove(str(var.CHROM)+'_'+str(var.POS)+'.csv')
             fisher_values, fisher_tables = pvector(records_data)
             context_dict = get_met(var.CHROM,list(records_data.columns.values),fasta)
+            for key,val in fisher_values.iteritems():
+                if context_dict[int(key)] != 'NA':
+                    meth_file.append([str(var.CHROM),str(var.POS),str(key),str(val),str(context_dict[int(key)])])
             window_frame = {key:val for key,val in fisher_values.iteritems() if context_dict[int(key)] != 'NA'}
             test_count = 1
-            print sorted(fisher_values.items(), key=operator.itemgetter(0))
-            feature_mean,window = recursive_fisher(window_frame,40,var.POS,40,test_count)
-            print sorted(window_frame.items(), key=operator.itemgetter(0))
+            feature_mean,window = recursive_fisher(window_frame,window,var.POS,window,test_count)
             var_accuracy[(var.CHROM)+':'+str(var.POS)] = accuracy
+            rank_frame  = {key:val for key,val in window_frame.iteritems() if val <= 0.05}
             rank_fisher, sites,median = ranked_fisher(window_frame,var.POS)
             #plot_matrix(records_data,var.CHROM+'_'+str(var.POS))
             out_file.append([var.CHROM,str(var.POS),var.REF,','.join([str(vals) for vals in var.ALT]),str(len(record_array)),str(index_list.count('R')),str(index_list.count('A')),str(context_dict.values().count('CG')),str(context_dict.values().count('CHG')), str(context_dict.values().count('CHH')),str(context_dict.values().count('NA')),str(accuracy),str(len(window_frame)),str(feature_mean),str(window),str(rank_fisher),str(sites),str(median)])
             #plot_ratios(records_data,var.CHROM,var.POS,context_dict)
     mean  = np.mean(var_accuracy.values())
     std = np.std(var_accuracy.values())
-    return(out_file)
+    return(out_file,meth_file)
 
 def plot_ratios(records_data,chr,pos,context_dict):
     methylation_records,context_records = counter(records_data,context_dict)
@@ -121,21 +124,27 @@ def ranked_fisher(fishers,pos):
     distance_list = list()
     sorted_fisher = sorted(fishers.items(), key=operator.itemgetter(1))
     fmpval = 0.0
-    cycle = 0 
+    cycle = 0
+    range = ''
     for cycle,pval in enumerate(sorted_fisher,start=1):
         fisher_list.append(pval[1])
-        fmpval = fisher_method(fisher_list)
+        #fmpval = fisher_method(fisher_list)
+        fmpval = scipy.stats.combine_pvalues(fisher_list)[1]
         if fmpval > 0.05/cycle :
             break
-        distance_list.append(abs(int(pval[0])-pos))
-    return (fmpval,cycle,np.median(distance_list))
+        distance_list.append(int(pval[0]))
+    if len(distance_list) == 0 :
+        range = '0,0'
+    else:
+        range = str(min(distance_list)) +','+ str(max(distance_list))
+    return (fmpval,cycle,range)
             
 def recursive_fisher(fishers,window,pos,scan,test_count):
-    if pos- (window/2) in [int(vals) for vals in fishers.keys()] and (pos + window/2) in [int(vals) for vals in fishers.keys()]  and fisher_method([fishers[pos-vals]  for vals in range(-(window/2),(window/2)+1) if (pos-vals) in fishers]) <= 0.01/float(test_count):
+    if pos- (window/2) in [int(vals) for vals in fishers.keys()] and (pos + window/2) in [int(vals) for vals in fishers.keys()]  and fisher_method([fishers[pos-vals]  for vals in range(-(window/2),(window/2)+1) if (pos-vals) in fishers]) <= 0.05/float(window):
         window += scan
         test_count +=1
         pval,window = recursive_fisher(fishers,window,pos,scan,test_count)
-    elif pos - ((window+scan)/2) in  [int(vals) for vals in fishers.keys()]  and (pos + (window+scan)/2) in [int(vals) for vals in fishers.keys()] and  fisher_method([fishers[(pos-vals)] for vals in range(-(window/2),(window/2)+1) if (pos-vals) in fishers]) > 0.01/float(test_count) and fisher_method([fishers[(pos-vals)] for vals in range(-((window+scan)/2),((window+scan)/2)+1) if (pos-vals) in fishers]) <= 0.01/float(test_count) and window+scan < len(fishers):
+    elif pos - ((window+scan)/2) in  [int(vals) for vals in fishers.keys()]  and (pos + (window+scan)/2) in [int(vals) for vals in fishers.keys()] and  fisher_method([fishers[(pos-vals)] for vals in range(-(window/2),(window/2)+1) if (pos-vals) in fishers]) > 0.05/float(window) and fisher_method([fishers[(pos-vals)] for vals in range(-((window+scan)/2),((window+scan)/2)+1) if (pos-vals) in fishers]) <= 0.05/float(window+scan) and window+scan < len(fishers):
         window += scan
         test_count += 1
         pval, window = recursive_fisher(fishers,window,pos,scan,test_count)
@@ -185,6 +194,7 @@ def label_maker(reads,frag,sequence,snp,alt):
             return(sense[snp+alt+sequence[frag-1]])
         except KeyError:
             return('')
+
 def get_met(chrom,positions,fasta):
     context = dict()
     for count,base in enumerate(positions):
@@ -199,12 +209,13 @@ def get_met(chrom,positions,fasta):
             if str(fasta[chrom][base-2]).upper() == 'C':
                 context[base] = 'CG'
             elif str(fasta[chrom][base-3]).upper() == 'C':
-                context[base] = 'CHG'
+                context[base] = 'NA'
             else:
                 context[base] = 'NA'
         else:
             context[base] = 'NA'
     return(context)
+
 def modifier(cigar):
     mod = 0 
     for vals in cigar:
@@ -273,10 +284,12 @@ def counter(records_data,context_dict):
         count_list[column] = pd.Series([met_ref,met_alt], index=['Ref','Alt'])
         context_list[context_dict[column]] = pd.Series([met_ref,met_alt],index=['Ref','Alt'])
     return(pd.DataFrame(count_list),pd.DataFrame(context_list))
-    
+
 def NaiveBayes(records_data):
     eozso = importr('e1071')
     records = com.convert_to_r_dataframe(records_data)
+    records[records == 2] =1
+
 
 def NaiveBayes(records_data,var):
     run_asm = subprocess.Popen(['/nfs/sw/R/R-3.2.1/bin/Rscript','/nethome/sravishankar/projects/AlleleSpecificMethylation/asmdetector.R',records_data],stdout=subprocess.PIPE, stdin=subprocess.PIPE,shell=False)
@@ -296,20 +309,42 @@ def split_chrom(spl):
     except ValueError:
         print(spl[1])
     return (spl[1]+'.vcf')
+
+
 if __name__ == '__main__':
-    p = Pool(10)
-    vcffiles = sys.argv[1]
-    bamfile = sys.argv[2]
-    fastafile = sys.argv[3]
-    chrm_map = chain(['chr'+str(vals) for vals in range(1,23)],['chrX','chrY'])
+    parser = argparse.ArgumentParser(description='Detecting allele specific methylation')
+    parser.add_argument('-v','--vcffile',type=str,help='Path to VCF file.')
+    parser.add_argument('-b','--bam',type=str,help='Path to BAM/SAM file.')
+    parser.add_argument('-f','--fasta',type=str,help='Reference fasta file.')
+    parser.add_argument('-t','--threads',type=int,help='Number of threads.')
+    parser.add_argument('-w','--windowsize',type=int,help='WIndow size for DMR detection.')
+    parser.add_argument('-d','--mindepth',type=int,help='Minimum depth per allele.')
+    parser.add_argument('-c','--chromannotated',action='store_true',help='VCF has chr prefix',default=False)
+    parser.add_argument('-o','--outfile',type=str,help='Output file path')
+    args = parser.parse_args()
+    p = Pool(args.threads)
+    vcffiles = args.vcffile
+    bamfile = args.bam
+    fastafile = args.fasta
+    window = args.windowsize
+    chr = args.chromannotated
+    if chr:
+        chrm_map = chain(['chr'+str(vals) for vals in range(1,23)],['chrX','chrY'])
+    else:
+        chrm_map = chain([str(vals) for vals in range(1,23)],['X','Y'])
     vcf_list = p.map(split_chrom,zip(repeat(vcffiles),chrm_map)) #[split_chrom(vcffiles,vals) for vals in chrm_map]
     #sys.exit()
-    out_file = csv.writer(open(os.path.splitext(vcffiles)[0]+'.tsv','w'),delimiter='\t')
-    distribution = p.map(create_matrix, zip(vcf_list,repeat(bamfile),repeat(fastafile)))
+    out_file = csv.writer(open(args.outfile+'.tsv','w'),delimiter='\t')
+    meth_file = csv.writer(open(args.outfile+'_meth.tsv','w'),delimiter='\t')
+    distribution = p.map(create_matrix, zip(vcf_list,repeat(bamfile),repeat(fastafile),repeat(window),repeat(args.mindepth)))
     #distribution = create_matrix([vcffiles,bamfile,fastafile])
     out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Recursive Fisher\'s method','Window Considered','Ranked Fisher\'s','Sites considered','Median distance from SNP'])
+    meth_file.writerow(['Chrom','SNPPos','MethylationPos','pval','Context'])
     for sections in distribution:
-        for lines in sections:
+        for lines in sections[0]:
             out_file.writerow(lines)
+    for sections in distribution:
+        for lines in sections[1]:
+            meth_file.writerow(lines)
     for files in vcf_list:
         os.remove(files)
