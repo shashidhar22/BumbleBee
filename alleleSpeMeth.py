@@ -78,7 +78,7 @@ def create_matrix(arguments):
             dist_dict[var.CHROM+'_'+str(var.POS)] = [(index_list.count('R')*100/float(len(index_list))),(index_list.count('A')*100/float(len(index_list)))]
             records_data = pd.DataFrame(record_array,index=index_list).drop(labels='',axis=0)
             records_data.sort(axis=1).replace(4,np.nan).to_csv(str(var.CHROM)+'_'+str(var.POS)+'.csv',na_rep='NaN')
-            accuracy = NaiveBayes(str(var.CHROM)+'_'+str(var.POS)+'.csv',str(var.CHROM)+'_'+str(var.POS))
+            accuracy = 'NA' #NaiveBayes(str(var.CHROM)+'_'+str(var.POS)+'.csv',str(var.CHROM)+'_'+str(var.POS))
             #os.remove(str(var.CHROM)+'_'+str(var.POS)+'.csv')
             fisher_values, fisher_tables = pvector(records_data)
             context_dict = get_met(var.CHROM,list(records_data.columns.values),fasta)
@@ -87,6 +87,7 @@ def create_matrix(arguments):
                     meth_file.append([str(var.CHROM),str(var.POS),str(key),str(val),str(context_dict[int(key)])])
             window_frame = {key:val for key,val in fisher_values.iteritems() if context_dict[int(key)] != 'NA'}
             test_count = 1
+            recursive_fishers(window_frame)
             feature_mean,window = recursive_fisher(window_frame,window,var.POS,window,test_count)
             var_accuracy[(var.CHROM)+':'+str(var.POS)] = accuracy
             rank_frame  = {key:val for key,val in window_frame.iteritems() if val <= 0.05}
@@ -138,7 +139,30 @@ def ranked_fisher(fishers,pos):
     else:
         range = str(min(distance_list)) +','+ str(max(distance_list))
     return (fmpval,cycle,range)
-            
+
+def recursive_fishers(fishers):
+    event = dict()
+    locus = dict()
+    loci = list()
+    pval = list()
+    pos = sorted(fishers.keys())
+    print(pos)
+    for count,index in enumerate(pos,start=1):
+        if count % 10 == 0:
+            pval.append(fishers[index])
+            loci.append(index)
+            event[count] = fisher_method(pval)
+            locus[count] = loci
+            pval = list()
+            loci = list()
+        else:
+            loci.append(index)
+            pval.append(fishers[index])
+    print(event)
+    print(locus)
+    sys.exit()
+    return
+
 def recursive_fisher(fishers,window,pos,scan,test_count):
     if pos- (window/2) in [int(vals) for vals in fishers.keys()] and (pos + window/2) in [int(vals) for vals in fishers.keys()]  and fisher_method([fishers[pos-vals]  for vals in range(-(window/2),(window/2)+1) if (pos-vals) in fishers]) <= 0.05/float(window):
         window += scan
@@ -230,7 +254,7 @@ def plot_matrix(records_data,name):
     palate=sns.color_palette("Set1", n_colors=8, desat=.5)
     sns.heatmap(records_data,square=False,cmap='gist_stern')
     plt.xticks(rotation=90)
-    plt.savefig(name+'.pdf')
+    plt.savefig(name)
     plt.close()
     return
 
@@ -336,8 +360,8 @@ if __name__ == '__main__':
     #sys.exit()
     out_file = csv.writer(open(args.outfile+'.tsv','w'),delimiter='\t')
     meth_file = csv.writer(open(args.outfile+'_meth.tsv','w'),delimiter='\t')
-    distribution = p.map(create_matrix, zip(vcf_list,repeat(bamfile),repeat(fastafile),repeat(window),repeat(args.mindepth)))
-    #distribution = create_matrix([vcffiles,bamfile,fastafile])
+    #distribution = p.map(create_matrix, zip(vcf_list,repeat(bamfile),repeat(fastafile),repeat(window),repeat(args.mindepth)))
+    distribution = create_matrix([vcffiles,bamfile,fastafile,window,args.mindepth])
     out_file.writerow(['Chrom','Pos','Ref','Alt','Depth','Ref Count','Alt Count','No of CpGs','No of CHG','No of CHH','No of NA','Naive Bayes Accuracy','No of significant features','Recursive Fisher\'s method','Window Considered','Ranked Fisher\'s','Sites considered','Median distance from SNP'])
     meth_file.writerow(['Chrom','SNPPos','MethylationPos','pval','Context'])
     for sections in distribution:
